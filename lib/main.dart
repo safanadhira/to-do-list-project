@@ -204,6 +204,37 @@ class _HomeState extends State<Home> {
     });
   }
 
+  bool _matchesCurrentFilter(TaskItem task) {
+    switch (_currentFilter) {
+      case TaskFilter.completed:
+        return task.isCompleted;
+      case TaskFilter.incomplete:
+        return !task.isCompleted;
+      case TaskFilter.all:
+        return true;
+    }
+  }
+
+  void _reorderVisibleTasks(int oldIndex, int newIndex) {
+    final List<TaskItem> visibleTasks = _filteredTasks;
+    final List<TaskItem> reorderedVisibleTasks = List<TaskItem>.from(visibleTasks);
+
+    final TaskItem movedTask = reorderedVisibleTasks.removeAt(oldIndex);
+    reorderedVisibleTasks.insert(newIndex, movedTask);
+
+    setState(() {
+      int visibleIndex = 0;
+
+      for (int taskIndex = 0; taskIndex < _tasks.length; taskIndex++) {
+        if (_matchesCurrentFilter(_tasks[taskIndex])) {
+          _tasks[taskIndex] = reorderedVisibleTasks[visibleIndex];
+          visibleIndex += 1;
+        }
+      }
+    });
+    _saveTasks();
+  }
+
   void _updateTaskCompletion(int index, bool isCompleted) {
     setState(() {
       _tasks[index].isCompleted = isCompleted;
@@ -469,14 +500,20 @@ class _HomeState extends State<Home> {
           ),
           // Task Cards Section
           Expanded(
-            child: ListView.builder(
+            child: ReorderableListView.builder(
               padding: const EdgeInsets.symmetric(horizontal: 16.0),
               itemCount: _filteredTasks.length,
+              buildDefaultDragHandles: false,
+              onReorderItem: _reorderVisibleTasks,
               itemBuilder: (context, index) {
-                final task = _filteredTasks[index];
-                final originalIndex = _tasks.indexOf(task);
+                final TaskItem task = _filteredTasks[index];
+                final int originalIndex = _tasks.indexOf(task);
+
                 return TaskCard(
+                  key: ValueKey(task),
                   task: task,
+                  reorderIndex: index,
+                  isReorderable: true,
                   onCompletionChanged: (value) {
                     if (originalIndex != -1) {
                       _updateTaskCompletion(originalIndex, value);
@@ -513,6 +550,8 @@ class _HomeState extends State<Home> {
 
 class TaskCard extends StatelessWidget {
   final TaskItem task;
+  final bool isReorderable;
+  final int? reorderIndex;
   final ValueChanged<bool> onCompletionChanged;
   final VoidCallback onEdit;
   final VoidCallback onDelete;
@@ -520,6 +559,8 @@ class TaskCard extends StatelessWidget {
   const TaskCard({
     super.key,
     required this.task,
+    this.isReorderable = false,
+    this.reorderIndex,
     required this.onCompletionChanged,
     required this.onEdit,
     required this.onDelete,
@@ -534,6 +575,17 @@ class TaskCard extends StatelessWidget {
         padding: const EdgeInsets.all(16.0),
         child: Row(
           children: <Widget>[
+            if (isReorderable && reorderIndex != null)
+              ReorderableDragStartListener(
+                index: reorderIndex!,
+                child: Padding(
+                  padding: const EdgeInsets.only(right: 12.0),
+                  child: Icon(
+                    Icons.drag_handle,
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ),
             IconButton(
               icon: Icon(
                 task.isCompleted ? Icons.check_circle : Icons.radio_button_unchecked,
