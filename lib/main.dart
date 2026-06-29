@@ -83,17 +83,21 @@ class _MyAppState extends State<MyApp> {
 
 enum TaskFilter { all, completed, incomplete }
 
+const String _defaultCategory = 'General';
+
 class TaskItem {
   final String title;
   final String description;
   bool isCompleted;
   final DateTime? deadline;
+  final String category;
 
   TaskItem({
     required this.title,
     required this.description,
     this.isCompleted = false,
     this.deadline,
+    this.category = _defaultCategory,
   });
 
   TaskItem copyWith({
@@ -101,12 +105,14 @@ class TaskItem {
     String? description,
     bool? isCompleted,
     DateTime? deadline,
+    String? category,
   }) {
     return TaskItem(
       title: title ?? this.title,
       description: description ?? this.description,
       isCompleted: isCompleted ?? this.isCompleted,
       deadline: deadline ?? this.deadline,
+      category: category ?? this.category,
     );
   }
 
@@ -117,6 +123,7 @@ class TaskItem {
       'description': description,
       'isCompleted': isCompleted,
       'deadline': deadline?.toIso8601String(),
+      'category': category,
     };
   }
 
@@ -127,6 +134,7 @@ class TaskItem {
       description: json['description'] as String,
       isCompleted: json['isCompleted'] as bool? ?? false,
       deadline: json['deadline'] != null ? DateTime.tryParse(json['deadline'] as String) : null,
+      category: json['category'] as String? ?? _defaultCategory,
     );
   }
 }
@@ -188,8 +196,10 @@ class Home extends StatefulWidget {
 
 class _HomeState extends State<Home> {
   TaskFilter _currentFilter = TaskFilter.all;
+  String? _currentCategoryFilter;
   Timer? _countdownTimer;
   late SharedPreferences prefs;
+  List<String> _categories = <String>[_defaultCategory];
   final List<TaskItem> _tasks = [
     TaskItem(
       title: "Task 1",
@@ -228,11 +238,73 @@ class _HomeState extends State<Home> {
   Future<void> _initStorage() async {
     prefs = await SharedPreferences.getInstance();
     await _loadTasks();
+    await _loadCategories();
   }
 
   Future<void> _saveTasks() async {
     final List<String> taskJsonList = _tasks.map((task) => jsonEncode(task.toJson())).toList();
     await prefs.setStringList('tasks', taskJsonList);
+  }
+
+  Future<void> _saveCategories() async {
+    await prefs.setStringList('categories', _categories);
+  }
+
+  List<String> _buildCategoryList(Iterable<String> categories) {
+    final Set<String> seen = <String>{};
+    final List<String> orderedCategories = <String>[];
+
+    void addCategory(String category) {
+      final String normalized = category.trim();
+      if (normalized.isEmpty || seen.contains(normalized)) {
+        return;
+      }
+
+      seen.add(normalized);
+      orderedCategories.add(normalized);
+    }
+
+    addCategory(_defaultCategory);
+    for (final String category in categories) {
+      addCategory(category);
+    }
+
+    return orderedCategories;
+  }
+
+  Future<void> _loadCategories() async {
+    final List<String>? storedCategories = prefs.getStringList('categories');
+    final List<String> taskCategories = _tasks.map((task) => task.category).toList();
+    final List<String> mergedCategories = _buildCategoryList([
+      ...?storedCategories,
+      ...taskCategories,
+    ]);
+
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _categories = mergedCategories;
+    });
+
+    await _saveCategories();
+  }
+
+  Future<void> _addCategory(String category) async {
+    final String trimmedCategory = category.trim();
+    if (trimmedCategory.isEmpty) {
+      return;
+    }
+
+    setState(() {
+      _categories = _buildCategoryList([
+        ..._categories,
+        trimmedCategory,
+      ]);
+    });
+
+    await _saveCategories();
   }
 
   Future<void> _loadTasks() async {
@@ -248,14 +320,18 @@ class _HomeState extends State<Home> {
   }
 
   List<TaskItem> get _filteredTasks {
-    switch (_currentFilter) {
-      case TaskFilter.completed:
-        return _tasks.where((task) => task.isCompleted).toList();
-      case TaskFilter.incomplete:
-        return _tasks.where((task) => !task.isCompleted).toList();
-      case TaskFilter.all:
-        return _tasks;
-    }
+    return _tasks.where((task) {
+      final bool matchesStatus = switch (_currentFilter) {
+        TaskFilter.completed => task.isCompleted,
+        TaskFilter.incomplete => !task.isCompleted,
+        TaskFilter.all => true,
+      };
+
+      final bool matchesCategory =
+          _currentCategoryFilter == null || task.category == _currentCategoryFilter;
+
+      return matchesStatus && matchesCategory;
+    }).toList();
   }
 
   void _toggleFilter() {
@@ -265,14 +341,22 @@ class _HomeState extends State<Home> {
   }
 
   bool _matchesCurrentFilter(TaskItem task) {
-    switch (_currentFilter) {
-      case TaskFilter.completed:
-        return task.isCompleted;
-      case TaskFilter.incomplete:
-        return !task.isCompleted;
-      case TaskFilter.all:
-        return true;
-    }
+    final bool matchesStatus = switch (_currentFilter) {
+      TaskFilter.completed => task.isCompleted,
+      TaskFilter.incomplete => !task.isCompleted,
+      TaskFilter.all => true,
+    };
+
+    final bool matchesCategory =
+        _currentCategoryFilter == null || task.category == _currentCategoryFilter;
+
+    return matchesStatus && matchesCategory;
+  }
+
+  void _toggleCategoryFilter(String? category) {
+    setState(() {
+      _currentCategoryFilter = category;
+    });
   }
 
   void _reorderVisibleTasks(int oldIndex, int newIndex) {
@@ -310,13 +394,33 @@ class _HomeState extends State<Home> {
         TextEditingController(text: existingTask?.title ?? '');
     final TextEditingController descriptionController =
         TextEditingController(text: existingTask?.description ?? '');
+    final TextEditingController newCategoryController = TextEditingController();
     DateTime? selectedDeadline = existingTask?.deadline;
+    String selectedCategory = existingTask?.category ?? _defaultCategory;
 
     return showDialog<TaskItem>(
       context: context,
       builder: (dialogContext) {
         return StatefulBuilder(
           builder: (dialogContext, setDialogState) {
+            Future<void> createCategory() async {
+              final String newCategory = newCategoryController.text.trim();
+              if (newCategory.isEmpty) {
+                return;
+              }
+
+              await _addCategory(newCategory);
+
+              if (!dialogContext.mounted) {
+                return;
+              }
+
+              setDialogState(() {
+                selectedCategory = newCategory;
+              });
+              newCategoryController.clear();
+            }
+
             Future<void> pickDeadline() async {
               final DateTime today = _dateOnly(DateTime.now());
               final DateTime initialDate = selectedDeadline == null
@@ -390,6 +494,50 @@ class _HomeState extends State<Home> {
                       minLines: 2,
                       maxLines: 4,
                     ),
+                    const SizedBox(height: 12.0),
+                    DropdownButtonFormField<String>(
+                      initialValue: _categories.contains(selectedCategory)
+                          ? selectedCategory
+                          : _defaultCategory,
+                      decoration: const InputDecoration(
+                        labelText: 'Category',
+                      ),
+                      items: _categories
+                          .map(
+                            (String category) => DropdownMenuItem<String>(
+                              value: category,
+                              child: Text(category),
+                            ),
+                          )
+                          .toList(),
+                      onChanged: (String? value) {
+                        if (value == null) {
+                          return;
+                        }
+
+                        setDialogState(() {
+                          selectedCategory = value;
+                        });
+                      },
+                    ),
+                    const SizedBox(height: 12.0),
+                    Row(
+                      children: <Widget>[
+                        Expanded(
+                          child: TextField(
+                            controller: newCategoryController,
+                            decoration: const InputDecoration(
+                              labelText: 'Create new category',
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8.0),
+                        TextButton(
+                          onPressed: createCategory,
+                          child: const Text('Add'),
+                        ),
+                      ],
+                    ),
                     const SizedBox(height: 16.0),
                     Align(
                       alignment: Alignment.centerLeft,
@@ -441,6 +589,7 @@ class _HomeState extends State<Home> {
                         title: title,
                         description: description.isEmpty ? 'No description provided' : description,
                         deadline: selectedDeadline,
+                        category: selectedCategory,
                       ),
                     );
                   },
@@ -590,25 +739,69 @@ class _HomeState extends State<Home> {
           // Filter Section
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.end,
-              children: <Widget>[
-                ElevatedButton.icon(
-                  onPressed: _toggleFilter,
-                  icon: const Icon(Icons.filter_list),
-                  label: Text("Filter: $_filterLabel"),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Theme.of(context).colorScheme.primary,
-                    foregroundColor: Theme.of(context).colorScheme.onPrimary,
-                  ),
-                ),
-              ],
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final double halfWidth = (constraints.maxWidth - 8.0) / 2;
+
+                return Row(
+                  children: <Widget>[
+                    SizedBox(
+                      width: halfWidth,
+                      child: ElevatedButton.icon(
+                        onPressed: _toggleFilter,
+                        icon: const Icon(Icons.filter_list),
+                        label: Text(
+                          "Status: $_filterLabel",
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Theme.of(context).colorScheme.primary,
+                          foregroundColor: Theme.of(context).colorScheme.onPrimary,
+                          minimumSize: const Size.fromHeight(40.0),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8.0),
+                    SizedBox(
+                      width: halfWidth,
+                      child: DropdownButtonFormField<String?>(
+                        initialValue: _currentCategoryFilter,
+                        isExpanded: true,
+                        decoration: InputDecoration(
+                          isDense: true,
+                          contentPadding: const EdgeInsets.symmetric(
+                            horizontal: 12.0,
+                            vertical: 12.0,
+                          ),
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(12.0),
+                          ),
+                          labelText: 'Category',
+                        ),
+                        items: <DropdownMenuItem<String?>>[
+                          const DropdownMenuItem<String?>(
+                            value: null,
+                            child: Text('All categories', overflow: TextOverflow.ellipsis),
+                          ),
+                          ..._categories.map(
+                            (String category) => DropdownMenuItem<String?>(
+                              value: category,
+                              child: Text(category, overflow: TextOverflow.ellipsis),
+                            ),
+                          ),
+                        ],
+                        onChanged: _toggleCategoryFilter,
+                      ),
+                    ),
+                  ],
+                );
+              },
             ),
           ),
           // Task Cards Section
           Expanded(
             child: ReorderableListView.builder(
-              padding: const EdgeInsets.symmetric(horizontal: 16.0),
+              padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 4.0),
               itemCount: _filteredTasks.length,
               buildDefaultDragHandles: false,
               onReorderItem: _reorderVisibleTasks,
@@ -676,19 +869,20 @@ class TaskCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Card(
-      elevation: 4.0,
-      margin: const EdgeInsets.symmetric(vertical: 8.0),
+      elevation: 2.0,
+      margin: const EdgeInsets.symmetric(vertical: 4.0),
       child: Padding(
-        padding: const EdgeInsets.all(16.0),
+        padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 10.0),
         child: Row(
           children: <Widget>[
             if (isReorderable && reorderIndex != null)
               ReorderableDragStartListener(
                 index: reorderIndex!,
                 child: Padding(
-                  padding: const EdgeInsets.only(right: 12.0),
+                  padding: const EdgeInsets.only(right: 8.0),
                   child: Icon(
                     Icons.drag_handle,
+                    size: 20.0,
                     color: Theme.of(context).colorScheme.onSurfaceVariant,
                   ),
                 ),
@@ -697,13 +891,16 @@ class TaskCard extends StatelessWidget {
               icon: Icon(
                 task.isCompleted ? Icons.check_circle : Icons.radio_button_unchecked,
                 color: task.isCompleted ? Colors.green : Colors.grey,
-                size: 28.0,
+                size: 22.0,
               ),
+              visualDensity: VisualDensity.compact,
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(minWidth: 32.0, minHeight: 32.0),
               onPressed: () {
                 onCompletionChanged(!task.isCompleted);
               },
             ),
-            const SizedBox(width: 16.0),
+            const SizedBox(width: 10.0),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -711,7 +908,7 @@ class TaskCard extends StatelessWidget {
                   Text(
                     task.title,
                     style: TextStyle(
-                      fontSize: 18.0,
+                      fontSize: 16.0,
                       fontWeight: FontWeight.bold,
                       color: Theme.of(context).colorScheme.primary,
                       decoration: task.isCompleted
@@ -719,31 +916,45 @@ class TaskCard extends StatelessWidget {
                           : TextDecoration.none,
                     ),
                   ),
-                  const SizedBox(height: 4.0),
+                  const SizedBox(height: 2.0),
                   Text(
                     task.description,
                     style: TextStyle(
-                      fontSize: 14.0,
+                      fontSize: 12.5,
                       color: Theme.of(context).colorScheme.onSurfaceVariant,
                     ),
                   ),
+                  const SizedBox(height: 4.0),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: Chip(
+                      label: Text(task.category),
+                      labelStyle: const TextStyle(fontSize: 11.0),
+                      visualDensity: VisualDensity.compact,
+                      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      padding: EdgeInsets.zero,
+                      side: BorderSide(
+                        color: Theme.of(context).colorScheme.primary.withValues(alpha: 0.25),
+                      ),
+                    ),
+                  ),
                   if (task.deadline != null) ...<Widget>[
-                    const SizedBox(height: 6.0),
+                    const SizedBox(height: 4.0),
                     Text(
                       'Deadline: ${_formatDeadlineLabel(context, task.deadline!)}',
                       style: TextStyle(
-                        fontSize: 13.0,
+                        fontSize: 12.0,
                         fontWeight: FontWeight.w600,
                         color: task.deadline!.isBefore(DateTime.now())
                             ? Colors.red
                             : Theme.of(context).colorScheme.primary,
                       ),
                     ),
-                    const SizedBox(height: 2.0),
+                    const SizedBox(height: 1.0),
                     Text(
                       getDeadlineCountdownText(task.deadline!),
                       style: TextStyle(
-                        fontSize: 13.0,
+                        fontSize: 11.5,
                         color: task.deadline!.isBefore(DateTime.now())
                             ? Colors.red
                             : Theme.of(context).colorScheme.onSurfaceVariant,
@@ -753,18 +964,26 @@ class TaskCard extends StatelessWidget {
                 ],
               ),
             ),
-            const SizedBox(width: 8.0),
+            const SizedBox(width: 4.0),
             Row(
               mainAxisSize: MainAxisSize.min,
               children: <Widget>[
                 IconButton(
                   icon: const Icon(Icons.edit),
                   color: Colors.brown,
+                  iconSize: 20.0,
+                  visualDensity: VisualDensity.compact,
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(minWidth: 32.0, minHeight: 32.0),
                   onPressed: onEdit,
                 ),
                 IconButton(
                   icon: const Icon(Icons.delete),
                   color: Colors.red,
+                  iconSize: 20.0,
+                  visualDensity: VisualDensity.compact,
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(minWidth: 32.0, minHeight: 32.0),
                   onPressed: onDelete,
                 ),
               ],

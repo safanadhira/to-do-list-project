@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -82,26 +83,36 @@ class _MyAppState extends State<MyApp> {
 
 enum TaskFilter { all, completed, incomplete }
 
+const String _defaultCategory = 'General';
+
 class TaskItem {
   final String title;
   final String description;
   bool isCompleted;
+  final DateTime? deadline;
+  final String category;
 
   TaskItem({
     required this.title,
     required this.description,
     this.isCompleted = false,
+    this.deadline,
+    this.category = _defaultCategory,
   });
 
   TaskItem copyWith({
     String? title,
     String? description,
     bool? isCompleted,
+    DateTime? deadline,
+    String? category,
   }) {
     return TaskItem(
       title: title ?? this.title,
       description: description ?? this.description,
       isCompleted: isCompleted ?? this.isCompleted,
+      deadline: deadline ?? this.deadline,
+      category: category ?? this.category,
     );
   }
 
@@ -111,6 +122,8 @@ class TaskItem {
       'title': title,
       'description': description,
       'isCompleted': isCompleted,
+      'deadline': deadline?.toIso8601String(),
+      'category': category,
     };
   }
 
@@ -120,8 +133,51 @@ class TaskItem {
       title: json['title'] as String,
       description: json['description'] as String,
       isCompleted: json['isCompleted'] as bool? ?? false,
+      deadline: json['deadline'] != null ? DateTime.tryParse(json['deadline'] as String) : null,
+      category: json['category'] as String? ?? _defaultCategory,
     );
   }
+}
+
+DateTime _dateOnly(DateTime date) {
+  return DateTime(date.year, date.month, date.day);
+}
+
+String _formatCountdown(Duration duration) {
+  final int days = duration.inDays;
+  final int hours = duration.inHours.remainder(24);
+  final int minutes = duration.inMinutes.remainder(60);
+
+  if (days > 0) {
+    return '${days}d ${hours}h';
+  }
+
+  if (hours > 0) {
+    return '${hours}h ${minutes}m';
+  }
+
+  if (minutes > 0) {
+    return '${minutes}m';
+  }
+
+  return 'less than 1m';
+}
+
+String getDeadlineCountdownText(DateTime deadline) {
+  final Duration difference = deadline.difference(DateTime.now());
+
+  if (difference.isNegative) {
+    return 'Overdue by ${_formatCountdown(difference.abs())}';
+  }
+
+  return 'Due in ${_formatCountdown(difference)}';
+}
+
+String _formatDeadlineLabel(BuildContext context, DateTime deadline) {
+  final MaterialLocalizations localizations = MaterialLocalizations.of(context);
+  final String dateText = localizations.formatFullDate(deadline);
+  final String timeText = localizations.formatTimeOfDay(TimeOfDay.fromDateTime(deadline));
+  return '$dateText at $timeText';
 }
 
 class Home extends StatefulWidget {
@@ -140,7 +196,9 @@ class Home extends StatefulWidget {
 
 class _HomeState extends State<Home> {
   TaskFilter _currentFilter = TaskFilter.all;
+  Timer? _countdownTimer;
   late SharedPreferences prefs;
+  List<String> _categories = <String>[_defaultCategory];
   final List<TaskItem> _tasks = [
     TaskItem(
       title: "Task 1",
@@ -163,16 +221,89 @@ class _HomeState extends State<Home> {
   void initState() {
     super.initState();
     _initStorage();
+    _countdownTimer = Timer.periodic(const Duration(minutes: 1), (_) {
+      if (mounted) {
+        setState(() {});
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _countdownTimer?.cancel();
+    super.dispose();
   }
 
   Future<void> _initStorage() async {
     prefs = await SharedPreferences.getInstance();
     await _loadTasks();
+    await _loadCategories();
   }
 
   Future<void> _saveTasks() async {
     final List<String> taskJsonList = _tasks.map((task) => jsonEncode(task.toJson())).toList();
     await prefs.setStringList('tasks', taskJsonList);
+  }
+
+  Future<void> _saveCategories() async {
+    await prefs.setStringList('categories', _categories);
+  }
+
+  List<String> _buildCategoryList(Iterable<String> categories) {
+    final Set<String> seen = <String>{};
+    final List<String> orderedCategories = <String>[];
+
+    void addCategory(String category) {
+      final String normalized = category.trim();
+      if (normalized.isEmpty || seen.contains(normalized)) {
+        return;
+      }
+
+      seen.add(normalized);
+      orderedCategories.add(normalized);
+    }
+
+    addCategory(_defaultCategory);
+    for (final String category in categories) {
+      addCategory(category);
+    }
+
+    return orderedCategories;
+  }
+
+  Future<void> _loadCategories() async {
+    final List<String>? storedCategories = prefs.getStringList('categories');
+    final List<String> taskCategories = _tasks.map((task) => task.category).toList();
+    final List<String> mergedCategories = _buildCategoryList([
+      ...?storedCategories,
+      ...taskCategories,
+    ]);
+
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _categories = mergedCategories;
+    });
+
+    await _saveCategories();
+  }
+
+  Future<void> _addCategory(String category) async {
+    final String trimmedCategory = category.trim();
+    if (trimmedCategory.isEmpty) {
+      return;
+    }
+
+    setState(() {
+      _categories = _buildCategoryList([
+        ..._categories,
+        trimmedCategory,
+      ]);
+    });
+
+    await _saveCategories();
   }
 
   Future<void> _loadTasks() async {
@@ -242,67 +373,232 @@ class _HomeState extends State<Home> {
     _saveTasks();
   }
 
+  Future<TaskItem?> _showTaskDialog({
+    required String dialogTitle,
+    TaskItem? existingTask,
+  }) async {
+    final TextEditingController titleController =
+        TextEditingController(text: existingTask?.title ?? '');
+    final TextEditingController descriptionController =
+        TextEditingController(text: existingTask?.description ?? '');
+    final TextEditingController newCategoryController = TextEditingController();
+    DateTime? selectedDeadline = existingTask?.deadline;
+    String selectedCategory = existingTask?.category ?? _defaultCategory;
+
+    return showDialog<TaskItem>(
+      context: context,
+      builder: (dialogContext) {
+        return StatefulBuilder(
+          builder: (dialogContext, setDialogState) {
+            Future<void> createCategory() async {
+              final String newCategory = newCategoryController.text.trim();
+              if (newCategory.isEmpty) {
+                return;
+              }
+
+              await _addCategory(newCategory);
+
+              if (!dialogContext.mounted) {
+                return;
+              }
+
+              setDialogState(() {
+                selectedCategory = newCategory;
+              });
+              newCategoryController.clear();
+            }
+
+            Future<void> pickDeadline() async {
+              final DateTime today = _dateOnly(DateTime.now());
+              final DateTime initialDate = selectedDeadline == null
+                  ? today
+                  : (_dateOnly(selectedDeadline!).isBefore(today)
+                      ? today
+                      : _dateOnly(selectedDeadline!));
+
+              final DateTime? pickedDate = await showDatePicker(
+                context: dialogContext,
+                initialDate: initialDate,
+                firstDate: today,
+                lastDate: DateTime(2100),
+              );
+
+              if (pickedDate == null) {
+                return;
+              }
+
+              if (!dialogContext.mounted) {
+                return;
+              }
+
+              final TimeOfDay initialTime = selectedDeadline == null
+                  ? TimeOfDay.now()
+                  : TimeOfDay.fromDateTime(selectedDeadline!);
+
+              final TimeOfDay? pickedTime = await showTimePicker(
+                context: dialogContext,
+                initialTime: initialTime,
+              );
+
+              if (pickedTime == null) {
+                return;
+              }
+
+              setDialogState(() {
+                selectedDeadline = DateTime(
+                  pickedDate.year,
+                  pickedDate.month,
+                  pickedDate.day,
+                  pickedTime.hour,
+                  pickedTime.minute,
+                );
+              });
+            }
+
+            final String deadlineLabel = selectedDeadline == null
+                ? 'No deadline selected'
+                : _formatDeadlineLabel(dialogContext, selectedDeadline!);
+
+            return AlertDialog(
+              title: Text(dialogTitle),
+              content: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: <Widget>[
+                    TextField(
+                      controller: titleController,
+                      decoration: const InputDecoration(
+                        labelText: 'Task title',
+                      ),
+                      autofocus: true,
+                    ),
+                    const SizedBox(height: 12.0),
+                    TextField(
+                      controller: descriptionController,
+                      decoration: const InputDecoration(
+                        labelText: 'Task description',
+                      ),
+                      minLines: 2,
+                      maxLines: 4,
+                    ),
+                    const SizedBox(height: 12.0),
+                    DropdownButtonFormField<String>(
+                      initialValue: _categories.contains(selectedCategory)
+                          ? selectedCategory
+                          : _defaultCategory,
+                      decoration: const InputDecoration(
+                        labelText: 'Category',
+                      ),
+                      items: _categories
+                          .map(
+                            (String category) => DropdownMenuItem<String>(
+                              value: category,
+                              child: Text(category),
+                            ),
+                          )
+                          .toList(),
+                      onChanged: (String? value) {
+                        if (value == null) {
+                          return;
+                        }
+
+                        setDialogState(() {
+                          selectedCategory = value;
+                        });
+                      },
+                    ),
+                    const SizedBox(height: 12.0),
+                    Row(
+                      children: <Widget>[
+                        Expanded(
+                          child: TextField(
+                            controller: newCategoryController,
+                            decoration: const InputDecoration(
+                              labelText: 'Create new category',
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8.0),
+                        TextButton(
+                          onPressed: createCategory,
+                          child: const Text('Add'),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 16.0),
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        'Deadline: $deadlineLabel',
+                        style: TextStyle(
+                          color: Theme.of(dialogContext).colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 8.0),
+                    Row(
+                      children: <Widget>[
+                        TextButton.icon(
+                          onPressed: pickDeadline,
+                          icon: const Icon(Icons.calendar_today),
+                          label: const Text('Pick deadline'),
+                        ),
+                        if (selectedDeadline != null)
+                          TextButton(
+                            onPressed: () {
+                              setDialogState(() {
+                                selectedDeadline = null;
+                              });
+                            },
+                            child: const Text('Clear'),
+                          ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+              actions: <Widget>[
+                TextButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(),
+                  child: const Text('Cancel'),
+                ),
+                ElevatedButton(
+                  onPressed: () {
+                    final String title = titleController.text.trim();
+                    final String description = descriptionController.text.trim();
+
+                    if (title.isEmpty) {
+                      return;
+                    }
+
+                    Navigator.of(dialogContext).pop(
+                      TaskItem(
+                        title: title,
+                        description: description.isEmpty ? 'No description provided' : description,
+                        deadline: selectedDeadline,
+                        category: selectedCategory,
+                      ),
+                    );
+                  },
+                  child: const Text('Save'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
   Future<void> _editTask(int index) async {
     if (index < 0 || index >= _tasks.length) {
       return;
     }
 
     final task = _tasks[index];
-    final titleController = TextEditingController(text: task.title);
-    final descriptionController = TextEditingController(text: task.description);
-
-    final TaskItem? updatedTask = await showDialog<TaskItem>(
-      context: context,
-      builder: (dialogContext) {
-        return AlertDialog(
-          title: const Text('Edit Task'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: <Widget>[
-              TextField(
-                controller: titleController,
-                decoration: const InputDecoration(
-                  labelText: 'Task title',
-                ),
-                autofocus: true,
-              ),
-              const SizedBox(height: 12.0),
-              TextField(
-                controller: descriptionController,
-                decoration: const InputDecoration(
-                  labelText: 'Task description',
-                ),
-                minLines: 2,
-                maxLines: 4,
-              ),
-            ],
-          ),
-          actions: <Widget>[
-            TextButton(
-              onPressed: () => Navigator.of(dialogContext).pop(),
-              child: const Text('Cancel'),
-            ),
-            ElevatedButton(
-              onPressed: () {
-                final title = titleController.text.trim();
-                final description = descriptionController.text.trim();
-
-                if (title.isEmpty) {
-                  return;
-                }
-
-                Navigator.of(dialogContext).pop(
-                  task.copyWith(
-                    title: title,
-                    description: description.isEmpty ? 'No description provided' : description,
-                  ),
-                );
-              },
-              child: const Text('Save'),
-            ),
-          ],
-        );
-      },
+    final TaskItem? updatedTask = await _showTaskDialog(
+      dialogTitle: 'Edit Task',
+      existingTask: task,
     );
 
     if (updatedTask == null) {
@@ -351,61 +647,8 @@ class _HomeState extends State<Home> {
   }
 
   Future<void> _addNewTask() async {
-    final titleController = TextEditingController();
-    final descriptionController = TextEditingController();
-
-    final TaskItem? newTask = await showDialog<TaskItem>(
-      context: context,
-      builder: (dialogContext) {
-        return AlertDialog(
-          title: const Text('Add New Task'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: <Widget>[
-              TextField(
-                controller: titleController,
-                decoration: const InputDecoration(
-                  labelText: 'Task title',
-                ),
-                autofocus: true,
-              ),
-              const SizedBox(height: 12.0),
-              TextField(
-                controller: descriptionController,
-                decoration: const InputDecoration(
-                  labelText: 'Task description',
-                ),
-                minLines: 2,
-                maxLines: 4,
-              ),
-            ],
-          ),
-          actions: <Widget>[
-            TextButton(
-              onPressed: () => Navigator.of(dialogContext).pop(),
-              child: const Text('Cancel'),
-            ),
-            ElevatedButton(
-              onPressed: () {
-                final title = titleController.text.trim();
-                final description = descriptionController.text.trim();
-
-                if (title.isEmpty) {
-                  return;
-                }
-
-                Navigator.of(dialogContext).pop(
-                  TaskItem(
-                    title: title,
-                    description: description.isEmpty ? 'No description provided' : description,
-                  ),
-                );
-              },
-              child: const Text('Add'),
-            ),
-          ],
-        );
-      },
+    final TaskItem? newTask = await _showTaskDialog(
+      dialogTitle: 'Add New Task',
     );
 
     if (newTask == null) {
@@ -620,6 +863,41 @@ class TaskCard extends StatelessWidget {
                       color: Theme.of(context).colorScheme.onSurfaceVariant,
                     ),
                   ),
+                  const SizedBox(height: 6.0),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: Chip(
+                      label: Text(task.category),
+                      visualDensity: VisualDensity.compact,
+                      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      side: BorderSide(
+                        color: Theme.of(context).colorScheme.primary.withValues(alpha: 0.25),
+                      ),
+                    ),
+                  ),
+                  if (task.deadline != null) ...<Widget>[
+                    const SizedBox(height: 6.0),
+                    Text(
+                      'Deadline: ${_formatDeadlineLabel(context, task.deadline!)}',
+                      style: TextStyle(
+                        fontSize: 13.0,
+                        fontWeight: FontWeight.w600,
+                        color: task.deadline!.isBefore(DateTime.now())
+                            ? Colors.red
+                            : Theme.of(context).colorScheme.primary,
+                      ),
+                    ),
+                    const SizedBox(height: 2.0),
+                    Text(
+                      getDeadlineCountdownText(task.deadline!),
+                      style: TextStyle(
+                        fontSize: 13.0,
+                        color: task.deadline!.isBefore(DateTime.now())
+                            ? Colors.red
+                            : Theme.of(context).colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
                 ],
               ),
             ),
