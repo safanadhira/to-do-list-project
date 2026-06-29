@@ -1,6 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:shared_preferences/shared_preferences.dart';
-import 'dart:convert';
 
 void main() => runApp(const MyApp());
 
@@ -39,24 +37,6 @@ class TaskItem {
       isCompleted: isCompleted ?? this.isCompleted,
     );
   }
-
-  // Convert TaskItem to JSON
-  Map<String, dynamic> toJson() {
-    return {
-      'title': title,
-      'description': description,
-      'isCompleted': isCompleted,
-    };
-  }
-
-  // Create TaskItem from JSON
-  factory TaskItem.fromJson(Map<String, dynamic> json) {
-    return TaskItem(
-      title: json['title'] as String,
-      description: json['description'] as String,
-      isCompleted: json['isCompleted'] as bool? ?? false,
-    );
-  }
 }
 
 class Home extends StatefulWidget {
@@ -68,7 +48,6 @@ class Home extends StatefulWidget {
 
 class _HomeState extends State<Home> {
   TaskFilter _currentFilter = TaskFilter.all;
-  late SharedPreferences prefs;
   final List<TaskItem> _tasks = [
     TaskItem(
       title: "Task 1",
@@ -86,34 +65,6 @@ class _HomeState extends State<Home> {
       isCompleted: false,
     ),
   ];
-
-  @override
-  void initState() {
-    super.initState();
-    _initStorage();
-  }
-
-  Future<void> _initStorage() async {
-    prefs = await SharedPreferences.getInstance();
-    await _loadTasks();
-  }
-
-  Future<void> _saveTasks() async {
-    final List<String> taskJsonList = _tasks.map((task) => jsonEncode(task.toJson())).toList();
-    await prefs.setStringList('tasks', taskJsonList);
-  }
-
-  Future<void> _loadTasks() async {
-    final List<String>? taskJsonList = prefs.getStringList('tasks');
-    if (taskJsonList != null && taskJsonList.isNotEmpty) {
-      setState(() {
-        _tasks.clear();
-        _tasks.addAll(
-          taskJsonList.map((taskJson) => TaskItem.fromJson(jsonDecode(taskJson))).toList(),
-        );
-      });
-    }
-  }
 
   List<TaskItem> get _filteredTasks {
     switch (_currentFilter) {
@@ -137,7 +88,6 @@ class _HomeState extends State<Home> {
     setState(() {
       _tasks[index].isCompleted = isCompleted;
     });
-    _saveTasks();
   }
 
   Future<void> _editTask(int index) async {
@@ -210,7 +160,6 @@ class _HomeState extends State<Home> {
     setState(() {
       _tasks[index] = updatedTask;
     });
-    _saveTasks();
   }
 
   Future<void> _deleteTask(int index) async {
@@ -245,7 +194,6 @@ class _HomeState extends State<Home> {
     setState(() {
       _tasks.removeAt(index);
     });
-    _saveTasks();
   }
 
   Future<void> _addNewTask() async {
@@ -313,7 +261,6 @@ class _HomeState extends State<Home> {
     setState(() {
       _tasks.add(newTask);
     });
-    _saveTasks();
   }
 
   String get _filterLabel {
