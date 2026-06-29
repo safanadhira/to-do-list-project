@@ -1,14 +1,81 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() => runApp(const MyApp());
 
-class MyApp extends StatelessWidget {
+class MyApp extends StatefulWidget {
   const MyApp({super.key});
 
   @override
+  State<MyApp> createState() => _MyAppState();
+}
+
+class _MyAppState extends State<MyApp> {
+  static const String _themeModeKey = 'themeMode';
+  ThemeMode _themeMode = ThemeMode.light;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadThemeMode();
+  }
+
+  Future<void> _loadThemeMode() async {
+    final SharedPreferences prefs = await SharedPreferences.getInstance();
+    final String? storedThemeMode = prefs.getString(_themeModeKey);
+
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _themeMode = storedThemeMode == 'dark' ? ThemeMode.dark : ThemeMode.light;
+    });
+  }
+
+  Future<void> _toggleThemeMode() async {
+    final ThemeMode nextThemeMode =
+        _themeMode == ThemeMode.dark ? ThemeMode.light : ThemeMode.dark;
+    final SharedPreferences prefs = await SharedPreferences.getInstance();
+
+    await prefs.setString(
+      _themeModeKey,
+      nextThemeMode == ThemeMode.dark ? 'dark' : 'light',
+    );
+
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _themeMode = nextThemeMode;
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
-    return const MaterialApp(
-      home: Home(),
+    return MaterialApp(
+      themeMode: _themeMode,
+      theme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: Colors.brown,
+          brightness: Brightness.light,
+        ),
+        useMaterial3: true,
+      ),
+      darkTheme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: Colors.brown,
+          brightness: Brightness.dark,
+        ),
+        useMaterial3: true,
+      ),
+      home: Home(
+        isDarkMode: _themeMode == ThemeMode.dark,
+        onThemeToggle: _toggleThemeMode,
+      ),
     );
   }
 }
@@ -37,10 +104,35 @@ class TaskItem {
       isCompleted: isCompleted ?? this.isCompleted,
     );
   }
+
+  // Convert TaskItem to JSON
+  Map<String, dynamic> toJson() {
+    return {
+      'title': title,
+      'description': description,
+      'isCompleted': isCompleted,
+    };
+  }
+
+  // Create TaskItem from JSON
+  factory TaskItem.fromJson(Map<String, dynamic> json) {
+    return TaskItem(
+      title: json['title'] as String,
+      description: json['description'] as String,
+      isCompleted: json['isCompleted'] as bool? ?? false,
+    );
+  }
 }
 
 class Home extends StatefulWidget {
-  const Home({super.key});
+  final bool isDarkMode;
+  final VoidCallback onThemeToggle;
+
+  const Home({
+    super.key,
+    required this.isDarkMode,
+    required this.onThemeToggle,
+  });
 
   @override
   State<Home> createState() => _HomeState();
@@ -48,6 +140,7 @@ class Home extends StatefulWidget {
 
 class _HomeState extends State<Home> {
   TaskFilter _currentFilter = TaskFilter.all;
+  late SharedPreferences prefs;
   final List<TaskItem> _tasks = [
     TaskItem(
       title: "Task 1",
@@ -66,6 +159,34 @@ class _HomeState extends State<Home> {
     ),
   ];
 
+  @override
+  void initState() {
+    super.initState();
+    _initStorage();
+  }
+
+  Future<void> _initStorage() async {
+    prefs = await SharedPreferences.getInstance();
+    await _loadTasks();
+  }
+
+  Future<void> _saveTasks() async {
+    final List<String> taskJsonList = _tasks.map((task) => jsonEncode(task.toJson())).toList();
+    await prefs.setStringList('tasks', taskJsonList);
+  }
+
+  Future<void> _loadTasks() async {
+    final List<String>? taskJsonList = prefs.getStringList('tasks');
+    if (taskJsonList != null && taskJsonList.isNotEmpty) {
+      setState(() {
+        _tasks.clear();
+        _tasks.addAll(
+          taskJsonList.map((taskJson) => TaskItem.fromJson(jsonDecode(taskJson))).toList(),
+        );
+      });
+    }
+  }
+
   List<TaskItem> get _filteredTasks {
     switch (_currentFilter) {
       case TaskFilter.completed:
@@ -73,7 +194,6 @@ class _HomeState extends State<Home> {
       case TaskFilter.incomplete:
         return _tasks.where((task) => !task.isCompleted).toList();
       case TaskFilter.all:
-      default:
         return _tasks;
     }
   }
@@ -84,10 +204,42 @@ class _HomeState extends State<Home> {
     });
   }
 
+  bool _matchesCurrentFilter(TaskItem task) {
+    switch (_currentFilter) {
+      case TaskFilter.completed:
+        return task.isCompleted;
+      case TaskFilter.incomplete:
+        return !task.isCompleted;
+      case TaskFilter.all:
+        return true;
+    }
+  }
+
+  void _reorderVisibleTasks(int oldIndex, int newIndex) {
+    final List<TaskItem> visibleTasks = _filteredTasks;
+    final List<TaskItem> reorderedVisibleTasks = List<TaskItem>.from(visibleTasks);
+
+    final TaskItem movedTask = reorderedVisibleTasks.removeAt(oldIndex);
+    reorderedVisibleTasks.insert(newIndex, movedTask);
+
+    setState(() {
+      int visibleIndex = 0;
+
+      for (int taskIndex = 0; taskIndex < _tasks.length; taskIndex++) {
+        if (_matchesCurrentFilter(_tasks[taskIndex])) {
+          _tasks[taskIndex] = reorderedVisibleTasks[visibleIndex];
+          visibleIndex += 1;
+        }
+      }
+    });
+    _saveTasks();
+  }
+
   void _updateTaskCompletion(int index, bool isCompleted) {
     setState(() {
       _tasks[index].isCompleted = isCompleted;
     });
+    _saveTasks();
   }
 
   Future<void> _editTask(int index) async {
@@ -160,6 +312,7 @@ class _HomeState extends State<Home> {
     setState(() {
       _tasks[index] = updatedTask;
     });
+    _saveTasks();
   }
 
   Future<void> _deleteTask(int index) async {
@@ -194,6 +347,7 @@ class _HomeState extends State<Home> {
     setState(() {
       _tasks.removeAt(index);
     });
+    _saveTasks();
   }
 
   Future<void> _addNewTask() async {
@@ -261,6 +415,7 @@ class _HomeState extends State<Home> {
     setState(() {
       _tasks.add(newTask);
     });
+    _saveTasks();
   }
 
   String get _filterLabel {
@@ -270,7 +425,6 @@ class _HomeState extends State<Home> {
       case TaskFilter.incomplete:
         return "Incomplete";
       case TaskFilter.all:
-      default:
         return "All";
     }
   }
@@ -287,7 +441,15 @@ class _HomeState extends State<Home> {
           ),
         ),
         centerTitle: true,
-        backgroundColor: Colors.brown[500],
+        actions: <Widget>[
+          IconButton(
+            onPressed: widget.onThemeToggle,
+            icon: Icon(
+              widget.isDarkMode ? Icons.light_mode : Icons.dark_mode,
+            ),
+            tooltip: widget.isDarkMode ? 'Switch to light mode' : 'Switch to dark mode',
+          ),
+        ],
       ),
       body: Column(
         children: <Widget>[
@@ -301,16 +463,16 @@ class _HomeState extends State<Home> {
                   children: <Widget>[
                     Icon(
                       Icons.check_circle_outline,
-                      color: Colors.brown,
+                      color: Theme.of(context).colorScheme.primary,
                       size: 40.0,
                     ),
                     const SizedBox(width: 10.0),
-                    const Text(
+                    Text(
                       "Today's Tasks",
                       style: TextStyle(
                         fontSize: 24.0,
                         fontWeight: FontWeight.bold,
-                        color: Colors.brown,
+                        color: Theme.of(context).colorScheme.primary,
                       ),
                     ),
                   ],
@@ -329,8 +491,8 @@ class _HomeState extends State<Home> {
                   icon: const Icon(Icons.filter_list),
                   label: Text("Filter: $_filterLabel"),
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.brown[500],
-                    foregroundColor: Colors.white,
+                    backgroundColor: Theme.of(context).colorScheme.primary,
+                    foregroundColor: Theme.of(context).colorScheme.onPrimary,
                   ),
                 ),
               ],
@@ -338,14 +500,20 @@ class _HomeState extends State<Home> {
           ),
           // Task Cards Section
           Expanded(
-            child: ListView.builder(
+            child: ReorderableListView.builder(
               padding: const EdgeInsets.symmetric(horizontal: 16.0),
               itemCount: _filteredTasks.length,
+              buildDefaultDragHandles: false,
+              onReorderItem: _reorderVisibleTasks,
               itemBuilder: (context, index) {
-                final task = _filteredTasks[index];
-                final originalIndex = _tasks.indexOf(task);
+                final TaskItem task = _filteredTasks[index];
+                final int originalIndex = _tasks.indexOf(task);
+
                 return TaskCard(
+                  key: ValueKey(task),
                   task: task,
+                  reorderIndex: index,
+                  isReorderable: true,
                   onCompletionChanged: (value) {
                     if (originalIndex != -1) {
                       _updateTaskCompletion(originalIndex, value);
@@ -372,8 +540,8 @@ class _HomeState extends State<Home> {
         icon: const Icon(Icons.add),
         label: const Text("Add New Task"),
         style: ElevatedButton.styleFrom(
-          backgroundColor: Colors.brown[500],
-          foregroundColor: Colors.white,
+          backgroundColor: Theme.of(context).colorScheme.primary,
+          foregroundColor: Theme.of(context).colorScheme.onPrimary,
         ),
       ),
     );
@@ -382,6 +550,8 @@ class _HomeState extends State<Home> {
 
 class TaskCard extends StatelessWidget {
   final TaskItem task;
+  final bool isReorderable;
+  final int? reorderIndex;
   final ValueChanged<bool> onCompletionChanged;
   final VoidCallback onEdit;
   final VoidCallback onDelete;
@@ -389,6 +559,8 @@ class TaskCard extends StatelessWidget {
   const TaskCard({
     super.key,
     required this.task,
+    this.isReorderable = false,
+    this.reorderIndex,
     required this.onCompletionChanged,
     required this.onEdit,
     required this.onDelete,
@@ -403,6 +575,17 @@ class TaskCard extends StatelessWidget {
         padding: const EdgeInsets.all(16.0),
         child: Row(
           children: <Widget>[
+            if (isReorderable && reorderIndex != null)
+              ReorderableDragStartListener(
+                index: reorderIndex!,
+                child: Padding(
+                  padding: const EdgeInsets.only(right: 12.0),
+                  child: Icon(
+                    Icons.drag_handle,
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ),
             IconButton(
               icon: Icon(
                 task.isCompleted ? Icons.check_circle : Icons.radio_button_unchecked,
@@ -423,7 +606,7 @@ class TaskCard extends StatelessWidget {
                     style: TextStyle(
                       fontSize: 18.0,
                       fontWeight: FontWeight.bold,
-                      color: Colors.brown,
+                      color: Theme.of(context).colorScheme.primary,
                       decoration: task.isCompleted
                           ? TextDecoration.lineThrough
                           : TextDecoration.none,
@@ -434,7 +617,7 @@ class TaskCard extends StatelessWidget {
                     task.description,
                     style: TextStyle(
                       fontSize: 14.0,
-                      color: Colors.brown[700],
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
                     ),
                   ),
                 ],
